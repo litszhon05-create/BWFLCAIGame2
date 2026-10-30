@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lantern</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #07060c; overflow: hidden; font-family: "Segoe UI", system-ui, sans-serif; color: #f4efe6; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+  #overlay, #end {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: rgba(6, 5, 10, 0.72);
+  }
+  #end { display: none; }
+  .card {
+    background: #14111a; border: 1px solid #3a3148; border-radius: 14px;
+    padding: 28px 32px; max-width: 460px; text-align: center;
+    box-shadow: 0 24px 70px rgba(0,0,0,.55);
+  }
+  h1 { margin: 0 0 8px; letter-spacing: 0.22em; font-weight: 700; font-size: 26px; }
+  p { margin: 8px 0; color: #b7a9c4; line-height: 1.45; }
+  kbd { background: #241e2e; border: 1px solid #4a3d5c; border-radius: 4px; padding: 1px 6px; }
+  button {
+    margin-top: 16px; font: inherit; cursor: pointer; color: #f4efe6;
+    background: #2a2036; border: 1px solid #6a4d86; border-radius: 8px; padding: 10px 22px;
+  }
+  button:hover { background: #3a2c4a; }
+  #hud {
+    position: fixed; left: 0; right: 0; top: 0; pointer-events: none;
+    display: flex; justify-content: space-between; padding: 16px 22px;
+    font-variant-numeric: tabular-nums; text-shadow: 0 2px 8px #000;
+  }
+  .stat { font-size: 28px; font-weight: 700; }
+  .stat span { display: block; font-size: 11px; letter-spacing: 0.12em; color: #b7a9c4; font-weight: 600; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div class="stat"><span>SCORE</span><b id="score">0</b></div>
+  <div class="stat" style="text-align:right"><span>BEST</span><b id="best">0</b></div>
+</div>
+<div id="overlay">
+  <div class="card">
+    <h1>LANTERN</h1>
+    <p>Keep the flame alive. Collect motes, slip past the shades.</p>
+    <p>Move with <kbd>WASD</kbd> or the arrow keys. The mouse pulls you when you hold it down.</p>
+    <button id="start" type="button">Light the lantern</button>
+  </div>
+</div>
+<div id="end">
+  <div class="card">
+    <h1 id="endTitle">EXTINGUISHED</h1>
+    <p id="endScore">Score 0</p>
+    <button id="again" type="button">Try again</button>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const scoreEl = document.getElementById("score");
+const bestEl = document.getElementById("best");
+const overlay = document.getElementById("overlay");
+const end = document.getElementById("end");
+const BEST_KEY = "lantern-best";
+
+let W = 0, H = 0, dpr = 1;
+let running = false, raf = 0, last = 0;
+let keys = {};
+let pointer = { x: 0, y: 0, down: false };
+let player, motes, shades, particles, score, best, time, spawn;
+
+best = Number(localStorage.getItem(BEST_KEY) || 0);
+bestEl.textContent = String(best);
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  canvas.width = Math.floor(W * dpr);
+  canvas.height = Math.floor(H * dpr);
+  canvas.style.width = W + "px";
+  canvas.style.height = H + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener("resize", resize);
+resize();
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function reset() {
+  player = { x: W * 0.5, y: H * 0.62, r: 14, vx: 0, vy: 0 };
+  motes = [];
+  shades = [];
+  particles = [];
+  score = 0;
+  time = 0;
+  spawn = 0;
+  scoreEl.textContent = "0";
+  for (let i = 0; i < 6; i++) motes.push(makeMote());
+}
+
+function makeMote() {
+  return { x: rand(40, W - 40), y: rand(40, H - 40), r: 7, pulse: rand(0, Math.PI * 2) };
+}
+
+function makeShade() {
+  const edge = Math.floor(Math.random() * 4);
+  let x, y;
+  if (edge === 0) { x = rand(0, W); y = -30; }
+  else if (edge === 1) { x = W + 30; y = rand(0, H); }
+  else if (edge === 2) { x = rand(0, W); y = H + 30; }
+  else { x = -30; y = rand(0, H); }
+  return { x, y, r: rand(12, 22), speed: rand(55, 90) + Math.min(time * 4, 140) };
+}
+
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rand(0, Math.PI * 2);
+    const s = rand(30, 160);
+    particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color });
+  }
+}
+
+function step(dt) {
+  time += dt;
+  let ax = 0, ay = 0;
+  if (keys.ArrowLeft || keys.a || keys.A) ax -= 1;
+  if (keys.ArrowRight || keys.d || keys.D) ax += 1;
+  if (keys.ArrowUp || keys.w || keys.W) ay -= 1;
+  if (keys.ArrowDown || keys.s || keys.S) ay += 1;
+  if (pointer.down) {
+    ax += (pointer.x - player.x) * 0.012;
+    ay += (pointer.y - player.y) * 0.012;
+  }
+  const len = Math.hypot(ax, ay) || 1;
+  const accel = pointer.down && !keys.ArrowLeft && !keys.a ? 520 : 780;
+  player.vx += (ax / len) * accel * dt;
+  player.vy += (ay / len) * accel * dt;
+  player.vx *= Math.pow(0.08, dt);
+  player.vy *= Math.pow(0.08, dt);
+  const max = 280;
+  const sp = Math.hypot(player.vx, player.vy);
+  if (sp > max) { player.vx *= max / sp; player.vy *= max / sp; }
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+  player.x = Math.max(player.r, Math.min(W - player.r, player.x));
+  player.y = Math.max(player.r, Math.min(H - player.r, player.y));
+
+  spawn += dt;
+  const interval = Math.max(0.55, 1.6 - time * 0.04);
+  if (spawn > interval) {
+    spawn = 0;
+    shades.push(makeShade());
+  }
+
+  for (const m of motes) m.pulse += dt * 3;
+  for (let i = motes.length - 1; i >= 0; i--) {
+    const m = motes[i];
+    if (Math.hypot(m.x - player.x, m.y - player.y) < player.r + m.r) {
+      score += 10;
+      scoreEl.textContent = String(score);
+      burst(m.x, m.y, "#ffd27a", 10);
+      motes.splice(i, 1);
+      motes.push(makeMote());
+    }
+  }
+
+  for (const s of shades) {
+    const dx = player.x - s.x;
+    const dy = player.y - s.y;
+    const d = Math.hypot(dx, dy) || 1;
+    s.x += (dx / d) * s.speed * dt;
+    s.y += (dy / d) * s.speed * dt;
+    if (d < player.r + s.r - 2) {
+      burst(player.x, player.y, "#ff8a6a", 28);
+      finish();
+      return;
+    }
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.life -= dt * 1.6;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+function draw() {
+  ctx.fillStyle = "#07060c";
+  ctx.fillRect(0, 0, W, H);
+
+  const g = ctx.createRadialGradient(player.x, player.y, 10, player.x, player.y, 220);
+  g.addColorStop(0, "rgba(255, 190, 90, 0.22)");
+  g.addColorStop(1, "rgba(255, 190, 90, 0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const m of motes) {
+    const glow = 0.55 + Math.sin(m.pulse) * 0.25;
+    ctx.beginPath();
+    ctx.fillStyle = "rgba(255, 214, 140, " + glow + ")";
+    ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  for (const s of shades) {
+    ctx.beginPath();
+    ctx.fillStyle = "#1a1024";
+    ctx.strokeStyle = "#6d4a86";
+    ctx.lineWidth = 2;
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  ctx.beginPath();
+  ctx.fillStyle = "#ffe7b0";
+  ctx.shadowColor = "#ffb347";
+  ctx.shadowBlur = 24;
+  ctx.arc(player.x, player.y, player.r, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.shadowBlur = 0;
+
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(p.life, 0);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x, p.y, 3, 3);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function loop(now) {
+  if (!running) return;
+  if (!last) last = now;
+  const dt = Math.min(0.033, (now - last) / 1000);
+  last = now;
+  step(dt);
+  if (running) draw();
+  raf = requestAnimationFrame(loop);
+}
+
+function start() {
+  overlay.style.display = "none";
+  end.style.display = "none";
+  reset();
+  running = true;
+  last = 0;
+  cancelAnimationFrame(raf);
+  raf = requestAnimationFrame(loop);
+}
+
+function finish() {
+  running = false;
+  cancelAnimationFrame(raf);
+  draw();
+  if (score > best) {
+    best = score;
+    localStorage.setItem(BEST_KEY, String(best));
+    bestEl.textContent = String(best);
+  }
+  document.getElementById("endScore").textContent = "Score " + score + (score >= best && score > 0 ? "  ·  new best" : "");
+  end.style.display = "flex";
+}
+
+window.addEventListener("keydown", (e) => {
+  keys[e.key] = true;
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", " "].includes(e.key)) e.preventDefault();
+  if ((e.key === "Enter" || e.key === " ") && !running) start();
+});
+window.addEventListener("keyup", (e) => { keys[e.key] = false; });
+canvas.addEventListener("pointerdown", (e) => {
+  pointer.down = true;
+  pointer.x = e.clientX;
+  pointer.y = e.clientY;
+});
+window.addEventListener("pointerup", () => { pointer.down = false; });
+window.addEventListener("pointermove", (e) => {
+  pointer.x = e.clientX;
+  pointer.y = e.clientY;
+});
+document.getElementById("start").addEventListener("click", start);
+document.getElementById("again").addEventListener("click", start);
+</script>
+</body>
+</html>
